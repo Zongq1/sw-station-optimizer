@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:scholar.google.com)",
+      "WebFetch(domain:ieeexplore.ieee.org)",
+      "WebFetch(domain:developer.nvidia.com)",
+      "WebFetch(domain:arxiv.org)",
+      "WebFetch(domain:www.nvidia.com)",
+      "WebFetch(domain:www.cnki.net)",
+      "WebFetch(domain:pymoo.org)",
+      "Bash(git init *)",
+      "Bash(git config *)",
+      "Bash(git add *)"
+    ]
+  }
+}
