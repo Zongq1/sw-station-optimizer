@@ -354,8 +354,12 @@ class ShortwaveStationEnv(gym.Env):
             if i == antenna_id or not ant.is_transmitting:
                 continue
 
+            from ..config import DEFAULT_FREQUENCY_MHZ
+            freq = antenna.current_frequency if antenna.current_frequency else DEFAULT_FREQUENCY_MHZ
+            other_freq = ant.current_frequency if ant.current_frequency else freq
+            avg_freq = (freq + other_freq) / 2.0
             isolation = self.em_simulator.calculate_isolation(
-                antenna, ant, 15.0
+                antenna, ant, avg_freq
             )
             interference = power_dbm - isolation
 

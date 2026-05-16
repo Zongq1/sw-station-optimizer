@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+import warnings
 from dataclasses import dataclass, field
 from typing import Optional, Callable
 
@@ -139,8 +141,8 @@ class GaussianProcess:
                 self.length_scale = np.clip(ls, 0.01, 100.0)
                 self.signal_variance = np.clip(sv, 0.01, 100.0)
                 self.noise_variance = np.clip(nv, 1e-6, 1.0)
-        except Exception:
-            pass
+        except Exception as e:
+            warnings.warn(f"GP hyperparameter optimization failed, using defaults: {e}")
 
 
 @dataclass
@@ -165,6 +167,7 @@ class MPSOptimizer:
         max_evaluations: int = 1000,
         initial_sample_size: int = 50,
         batch_size: int = 10,
+        seed: int = None,
     ):
         """
         初始化 MPS 优化器
@@ -184,6 +187,7 @@ class MPSOptimizer:
         self.max_evaluations = max_evaluations
         self.initial_sample_size = initial_sample_size
         self.batch_size = batch_size
+        self.rng = np.random.default_rng(seed)
 
         # 源模型库
         self.source_models: list[SourceModel] = []
@@ -428,7 +432,7 @@ class MPSOptimizer:
 
             # 随机起点
             n_starts = min(50, 10 * n_vars)
-            start_points = np.random.uniform(lb, ub, size=(n_starts, n_vars))
+            start_points = self.rng.uniform(lb, ub, size=(n_starts, n_vars))
 
             ei_optimal_points = []
             for x0 in start_points:
@@ -443,12 +447,12 @@ class MPSOptimizer:
                     )
                     if result.success:
                         ei_optimal_points.append(result.x)
-                except Exception:
-                    pass
+                except Exception as e:
+                    warnings.warn(f"L-BFGS-B EI optimization failed: {e}")
 
             if len(ei_optimal_points) < n_points:
                 # 补充随机候选
-                extra = np.random.uniform(lb, ub, size=(n_points - len(ei_optimal_points), n_vars))
+                extra = self.rng.uniform(lb, ub, size=(n_points - len(ei_optimal_points), n_vars))
                 ei_optimal_points.extend(extra)
 
             best_points.append(np.array(ei_optimal_points[:n_points]))
@@ -518,9 +522,10 @@ class MPSOptimizer:
             优化结果
         """
         n_vars = len(bounds)
+        start_time = time.perf_counter()
 
         # 初始采样
-        X_init = np.random.uniform(
+        X_init = self.rng.uniform(
             [b[0] for b in bounds],
             [b[1] for b in bounds],
             size=(self.initial_sample_size, n_vars),
@@ -550,6 +555,8 @@ class MPSOptimizer:
         pareto_front, pareto_solutions = extract_pareto_front(y_all, X_all)
         hv = calculate_hypervolume(pareto_front)
 
+        elapsed = time.perf_counter() - start_time
+
         return OptimizationResult(
             pareto_front=pareto_front,
             pareto_solutions=pareto_solutions,
@@ -557,5 +564,5 @@ class MPSOptimizer:
             all_solutions=X_all,
             n_generations=n_iterations,
             hypervolume=hv,
-            execution_time=0.0,
+            execution_time=elapsed,
         )

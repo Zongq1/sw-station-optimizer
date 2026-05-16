@@ -240,6 +240,7 @@ def _hypervolume_approximate(
     pareto_front: np.ndarray,
     reference_point: np.ndarray,
     n_samples: int = 10000,
+    seed: int = 42,
 ) -> float:
     """
     近似计算高维超体积
@@ -253,7 +254,8 @@ def _hypervolume_approximate(
     upper_bound = reference_point
 
     # 生成随机采样点
-    samples = np.random.uniform(
+    rng = np.random.default_rng(seed)
+    samples = rng.uniform(
         lower_bound,
         upper_bound,
         size=(n_samples, n_objectives),

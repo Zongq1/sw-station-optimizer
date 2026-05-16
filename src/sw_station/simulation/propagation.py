@@ -310,6 +310,11 @@ class SkyWavePropagation:
         n_hops = PropagationPath.estimate_hops(distance_km)
         ground_loss = self._ground_reflection_loss(n_hops)
 
+        # 极化耦合损耗 - 与 calculate_path_loss 一致的法拉第旋转模型
+        freq_factor = max(0.1, 1.0 - frequency / 30.0)
+        solar_factor = 1.0 + 0.5 * (ionosphere.solar_sunspot_number / 200.0)
+        polarization_loss = 6.0 * freq_factor * solar_factor
+
         return LinkBudget(
             tx_power=tx_power_dbm,
             tx_antenna_gain=tx_gain_dbi,
@@ -317,7 +322,7 @@ class SkyWavePropagation:
             free_space_path_loss=self._free_space_loss(frequency, distance_km),
             ionospheric_absorption=iono_absorption,
             ground_reflection_loss=ground_loss,
-            polarization_mismatch=3.0,
+            polarization_mismatch=polarization_loss,
             feedline_loss=2.0,
             required_snr=required_snr_db,
         )

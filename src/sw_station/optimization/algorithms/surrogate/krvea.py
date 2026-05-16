@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Optional, Callable
 
@@ -81,12 +82,12 @@ class ReferenceVectorAdaptor:
                 if len(vectors) > self.n_vectors:
                     vectors = vectors[:self.n_vectors]
                 elif len(vectors) < self.n_vectors:
-                    extra = np.random.dirichlet(
+                    extra = self.rng.dirichlet(
                         np.ones(self.n_objectives), self.n_vectors - len(vectors)
                     )
                     vectors = np.vstack([vectors, extra])
             except Exception:
-                vectors = np.random.dirichlet(np.ones(self.n_objectives), self.n_vectors)
+                vectors = self.rng.dirichlet(np.ones(self.n_objectives), self.n_vectors)
 
         return vectors
 
@@ -150,6 +151,7 @@ class KRVEAOptimizer:
             算法配置
         """
         self.config = config or KRVEAConfig()
+        self.rng = np.random.default_rng(self.config.seed)
         self.gp_models: list[GaussianProcess] = []
         self.ref_vector_adaptor: Optional[ReferenceVectorAdaptor] = None
         self.X_history: list[np.ndarray] = []
@@ -233,9 +235,18 @@ class KRVEAOptimizer:
                     selected.add(idx)
                     break
 
-        # 如果还不够，随机补充
+        # 如果还不够，补充距离参考向量最远的候选解
         while len(selected) < n_select:
-            selected.add(np.random.randint(n_candidates))
+            remaining = [i for i in range(n_candidates) if i not in selected]
+            if not remaining:
+                break
+            # 选择与已选解平均角度最大的候选
+            if len(selected) > 0:
+                avg_angles = angles[list(selected)].mean(axis=0)
+                best_remaining = remaining[np.argmax(avg_angles[remaining])]
+                selected.add(best_remaining)
+            else:
+                selected.add(remaining[0])
 
         return np.array(list(selected))[:n_select]
 
@@ -266,12 +277,13 @@ class KRVEAOptimizer:
             优化结果
         """
         n_vars = len(bounds)
+        start_time = time.perf_counter()
 
         # 初始化
         self._initialize_models(n_objectives, n_vars)
 
         # 初始采样
-        X_init = np.random.uniform(
+        X_init = self.rng.uniform(
             [b[0] for b in bounds],
             [b[1] for b in bounds],
             size=(self.config.initial_sample_size, n_vars),
@@ -323,6 +335,8 @@ class KRVEAOptimizer:
         pareto_front, pareto_solutions = extract_pareto_front(y_all, X_all)
         hv = calculate_hypervolume(pareto_front)
 
+        elapsed = time.perf_counter() - start_time
+
         return OptimizationResult(
             pareto_front=pareto_front,
             pareto_solutions=pareto_solutions,
@@ -330,7 +344,7 @@ class KRVEAOptimizer:
             all_solutions=X_all,
             n_generations=n_iterations,
             hypervolume=hv,
-            execution_time=0.0,
+            execution_time=elapsed,
         )
 
     def _generate_candidates(
@@ -346,7 +360,7 @@ class KRVEAOptimizer:
         n_perturbation = n_candidates - n_random
 
         # 随机候选
-        random_candidates = np.random.uniform(
+        random_candidates = self.rng.uniform(
             [b[0] for b in bounds],
             [b[1] for b in bounds],
             size=(n_random, n_vars),
@@ -371,12 +385,12 @@ class KRVEAOptimizer:
                 n_explore = n_perturbation - n_exploit
 
                 # 开发：在 Pareto 解附近扰动
-                exploit_indices = np.random.choice(pareto_indices, n_exploit, replace=True)
-                exploit_perturbation = np.random.normal(0, 0.05, (n_exploit, n_vars))
+                exploit_indices = self.rng.choice(pareto_indices, n_exploit, replace=True)
+                exploit_perturbation = self.rng.normal(0, 0.05, (n_exploit, n_vars))
                 exploit_candidates = X_array[exploit_indices] + exploit_perturbation * scale
 
                 # 探索：在不确定性大的区域采样
-                explore_candidates = np.random.uniform(
+                explore_candidates = self.rng.uniform(
                     [b[0] for b in bounds],
                     [b[1] for b in bounds],
                     size=(n_explore, n_vars),
@@ -385,7 +399,7 @@ class KRVEAOptimizer:
                 perturbed_candidates = np.vstack([exploit_candidates, explore_candidates])
             else:
                 # 没有 Pareto 解，全部随机
-                perturbed_candidates = np.random.uniform(
+                perturbed_candidates = self.rng.uniform(
                     [b[0] for b in bounds],
                     [b[1] for b in bounds],
                     size=(n_perturbation, n_vars),

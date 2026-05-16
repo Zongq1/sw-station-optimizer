@@ -33,6 +33,7 @@ class MultiObjectiveReward:
         self,
         weights: Optional[RewardWeights] = None,
         em_simulator: Optional[EMSimulator] = None,
+        max_allowed_interference_dbm: float = -130.0,
     ):
         """
         初始化奖励计算器
@@ -43,9 +44,12 @@ class MultiObjectiveReward:
             奖励权重
         em_simulator : EMSimulator, optional
             电磁仿真器
+        max_allowed_interference_dbm : float
+            最大允许干扰功率 (dBm)
         """
         self.weights = weights or RewardWeights()
         self.em_simulator = em_simulator or EMSimulator()
+        self.max_allowed_interference_dbm = max_allowed_interference_dbm
 
     def calculate(
         self,
@@ -195,14 +199,19 @@ class MultiObjectiveReward:
             干扰惩罚（负值）
         """
         penalty = 0.0
-        max_allowed = -130.0  # dBm
+        max_allowed = self.max_allowed_interference_dbm
+        from ..config import DEFAULT_FREQUENCY_MHZ
+        freq = antenna.current_frequency if antenna.current_frequency else DEFAULT_FREQUENCY_MHZ
 
         for other in active_antennas:
             if other.id == antenna.id:
                 continue
 
+            other_freq = other.current_frequency if other.current_frequency else freq
+            avg_freq = (freq + other_freq) / 2.0
+
             isolation = self.em_simulator.calculate_isolation(
-                antenna, other, 15.0
+                antenna, other, avg_freq
             )
             interference = power_dbm - isolation
 
@@ -250,8 +259,13 @@ class ShapedReward(MultiObjectiveReward):
         self.prev_completed = completed_tasks
 
         # 频率效率奖励（使用 FOT 附近频率）
-        fot = 0.85 * 20.0  # 简化 FOT
-        freq_efficiency = 1.0 - abs(frequency - fot) / fot
+        from ..simulation.propagation import SkyWavePropagation
+        from ..models.channel import IonosphericState
+        propagation = SkyWavePropagation()
+        ionosphere = IonosphericState()
+        muf = propagation.calculate_muf(1000.0, ionosphere)
+        fot = 0.85 * muf
+        freq_efficiency = 1.0 - abs(frequency - fot) / fot if fot > 0 else 0.0
         base_reward += 0.1 * max(0, freq_efficiency)
 
         details["total_reward_shaped"] = base_reward

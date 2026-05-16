@@ -216,7 +216,8 @@ class ShortwaveStationProblem(Problem):
                 if ant_i.current_frequency and ant_j.current_frequency:
                     freq = (ant_i.current_frequency + ant_j.current_frequency) / 2
                 else:
-                    freq = 15.0  # 默认
+                    from ..config import DEFAULT_FREQUENCY_MHZ
+                    freq = DEFAULT_FREQUENCY_MHZ
 
                 isolation = self.em_simulator.calculate_isolation(
                     ant_i, ant_j, freq
@@ -324,9 +325,8 @@ class ShortwaveStationProblem(Problem):
                 ant_j = self.station.antennas[j]
 
                 # 计算隔离度 - 使用实际频率
-                freq = 15.0
-                if ant_i.current_frequency:
-                    freq = ant_i.current_frequency
+                from ..config import DEFAULT_FREQUENCY_MHZ
+                freq = ant_i.current_frequency if ant_i.current_frequency else DEFAULT_FREQUENCY_MHZ
 
                 isolation = self.em_simulator.calculate_isolation(
                     ant_i, ant_j, freq

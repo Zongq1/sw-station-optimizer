@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Optional, Callable
 
@@ -139,6 +140,7 @@ class NSGARunner:
         algorithm = self.create_algorithm(problem)
 
         # 运行优化
+        start_time = time.perf_counter()
         minimize_kwargs = {
             "seed": self.config.seed,
             "verbose": self.config.verbose,
@@ -154,6 +156,7 @@ class NSGARunner:
         )
 
         # 提取结果
+        elapsed = time.perf_counter() - start_time
         pareto_front, pareto_solutions = extract_pareto_front(res.F, res.X)
 
         # 计算超体积
@@ -166,7 +169,7 @@ class NSGARunner:
             all_solutions=res.X,
             n_generations=res.algorithm.n_gen if hasattr(res.algorithm, 'n_gen') else 0,
             hypervolume=hv,
-            execution_time=0.0,  # 需要外部计时
+            execution_time=elapsed,
         )
 
         return self.result

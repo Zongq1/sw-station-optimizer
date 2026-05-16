@@ -4,6 +4,9 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
+# 默认工作频率 (MHz) - 短波频段中心频率
+DEFAULT_FREQUENCY_MHZ: float = 15.0
+
 
 @dataclass
 class StationConfig:

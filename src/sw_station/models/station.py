@@ -273,6 +273,7 @@ class StationDigitalTwin:
         self,
         boundary: tuple[float, float, float, float] = (0, 2000, 0, 2000),
         antenna_types: Optional[list[AntennaType]] = None,
+        seed: int = None,
     ) -> None:
         """
         随机初始化天线布局
@@ -284,6 +285,7 @@ class StationDigitalTwin:
         antenna_types : list[AntennaType], optional
             天线类型列表，默认使用混合类型
         """
+        self._rng = np.random.default_rng(seed)
         if antenna_types is None:
             antenna_types = [
                 AntennaType.LOG_PERIODIC,
@@ -301,13 +303,13 @@ class StationDigitalTwin:
             ant_type = antenna_types[i % len(antenna_types)]
 
             # 随机位置
-            x = np.random.uniform(x_min, x_max)
-            y = np.random.uniform(y_min, y_max)
-            z = np.random.uniform(10, 50)  # 架设高度 10-50m
+            x = self._rng.uniform(x_min, x_max)
+            y = self._rng.uniform(y_min, y_max)
+            z = self._rng.uniform(10, 50)  # 架设高度 10-50m
 
             # 随机朝向
-            azimuth = np.random.uniform(0, 360)
-            elevation = np.random.uniform(0, 30)
+            azimuth = self._rng.uniform(0, 360)
+            elevation = self._rng.uniform(0, 30)
 
             # 创建天线设备
             antenna = AntennaDevice(

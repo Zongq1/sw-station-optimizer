@@ -192,7 +192,8 @@ class DigitalTwinEngine:
                     ant_j = self.station.antennas[j]
 
                     # 使用天线实际工作频率
-                    freq = 15.0
+                    from ..config import DEFAULT_FREQUENCY_MHZ
+                    freq = DEFAULT_FREQUENCY_MHZ
                     if ant_i.current_frequency and ant_j.current_frequency:
                         freq = (ant_i.current_frequency + ant_j.current_frequency) / 2
                     elif ant_i.current_frequency:

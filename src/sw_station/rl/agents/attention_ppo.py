@@ -28,6 +28,8 @@ class AttentionPPOConfig:
     hidden_size: int = 256
     attention_heads: int = 4
     n_objectives: int = 3
+    # 多目标奖励权重
+    reward_weights: dict = None  # 若为None，自动从env配置继承
 
 
 class AttentionModule(nn.Module):
@@ -478,7 +480,11 @@ class AttentionMO_PPOAgent:
                 # 价值损失（多目标）- 每个目标独立计算
                 # returns 是标量，分解为多目标回报
                 n_obj = values.size(1)
-                w = torch.tensor([0.5, 0.3, 0.2], device=values.device)
+                rw = self.config.reward_weights or {"throughput": 0.5, "delay": 0.3, "interference": 0.2}
+                w = torch.tensor(
+                    [rw.get("throughput", 0.5), rw.get("delay", 0.3), rw.get("interference", 0.2)],
+                    device=values.device
+                )
                 multi_returns = returns[batch_idx].unsqueeze(1) * w.unsqueeze(0)
                 value_loss = F.mse_loss(values, multi_returns)
 

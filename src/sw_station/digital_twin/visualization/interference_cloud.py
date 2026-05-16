@@ -46,6 +46,7 @@ class InterferenceCloudRenderer:
         self,
         frequency: float = 15.0,
         resolution: int = 20,
+        seed: int = None,
     ) -> dict:
         """
         计算干涉云数据
@@ -76,6 +77,7 @@ class InterferenceCloudRenderer:
                     )
 
         # 生成干涉云数据
+        rng = np.random.default_rng(seed)
         cloud_points = []
         cloud_colors = []
 
@@ -98,7 +100,7 @@ class InterferenceCloudRenderer:
                     # 扰动强度与隔离度相关（隔离度越低，扰动越大）
                     perturbation_scale = max(0, 50 - isolation / 2)
 
-                    perturbation = np.random.normal(0, perturbation_scale, 3)
+                    perturbation = rng.normal(0, perturbation_scale, 3)
                     perturbation[2] = abs(perturbation[2])  # z 方向非负
 
                     cloud_point = point + perturbation

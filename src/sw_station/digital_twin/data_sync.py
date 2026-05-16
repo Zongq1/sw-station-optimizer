@@ -253,13 +253,34 @@ class DataSynchronizer:
         if len(grid) < 4:
             return 1000.0  # 默认距离
 
-        # 简化：将网格转换为大致距离
-        # 假设台站在 FN31 附近
         try:
-            ref_lat = 40.0 + (ord(grid[1]) - ord('N')) * 10 + int(grid[3]) * 1
-            ref_lon = -70.0 + (ord(grid[0]) - ord('F')) * 20 + int(grid[2]) * 2
-            # 简化距离估算
-            distance = np.sqrt((ref_lat - 40)**2 + (ref_lon + 70)**2) * 111  # ~111km/度
+            # Maidenhead 网格转经纬度 (标准算法)
+            # 字段: A-R (18个), 子方块: 0-9, 扩展: A-X
+            grid = grid.upper()
+            lon_field = (ord(grid[0]) - ord('A')) * 20 - 180
+            lat_field = (ord(grid[1]) - ord('A')) * 10 - 90
+            lon_square = int(grid[2]) * 2
+            lat_square = int(grid[3]) * 1
+            # 子方块 (如果有)
+            lon_sub = 0.0
+            lat_sub = 0.0
+            if len(grid) >= 6:
+                lon_sub = (ord(grid[4]) - ord('A')) * (2.0 / 24)
+                lat_sub = (ord(grid[5]) - ord('A')) * (1.0 / 24)
+            ref_lon = lon_field + lon_square + lon_sub + 1.0  # 中心经度
+            ref_lat = lat_field + lat_square + lat_sub + 0.5  # 中心纬度
+
+            # 默认台站位置 (北京附近)
+            station_lat = 40.0
+            station_lon = 116.0
+
+            # Haversine 公式计算大圆距离
+            lat1, lat2 = np.radians(station_lat), np.radians(ref_lat)
+            dlat = lat2 - lat1
+            dlon = np.radians(ref_lon - station_lon)
+            a = np.sin(dlat/2)**2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon/2)**2
+            c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1-a))
+            distance = 6371.0 * c  # 地球半径 6371 km
             return max(distance, 100.0)
         except (ValueError, IndexError):
             return 1000.0
@@ -364,7 +385,7 @@ class DataSynchronizer:
             "processed_count": self.processed_count,
         }
 
-    def create_sample_wspr_data(self, n_records: int = 10) -> list[DataRecord]:
+    def create_sample_wspr_data(self, n_records: int = 10, seed: int = None) -> list[DataRecord]:
         """
         创建示例 WSPR 数据（用于测试）
 
@@ -378,6 +399,7 @@ class DataSynchronizer:
         list[DataRecord]
             示例数据
         """
+        rng = np.random.default_rng(seed)
         records = []
         for i in range(n_records):
             record = DataRecord(
@@ -386,17 +408,17 @@ class DataSynchronizer:
                 data_type="propagation",
                 payload={
                     "callsign": f"W1AW{i:03d}",
-                    "frequency": np.random.uniform(7.0, 14.0),
-                    "snr": np.random.randint(-20, 20),
-                    "power": np.random.choice([1, 5, 10, 20, 30]),
+                    "frequency": rng.uniform(7.0, 14.0),
+                    "snr": rng.integers(-20, 20),
+                    "power": rng.choice([1, 5, 10, 20, 30]),
                     "grid": "FN31",
                 },
-                quality=np.random.uniform(0.5, 1.0),
+                quality=rng.uniform(0.5, 1.0),
             )
             records.append(record)
         return records
 
-    def create_sample_ionosonde_data(self) -> DataRecord:
+    def create_sample_ionosonde_data(self, seed: int = None) -> DataRecord:
         """
         创建示例电离层探测数据
 
@@ -405,15 +427,16 @@ class DataSynchronizer:
         DataRecord
             示例数据
         """
+        rng = np.random.default_rng(seed)
         return DataRecord(
             timestamp=time.time(),
             source=DataSource.IONOSONDE,
             data_type="ionosphere",
             payload={
-                "fof2": np.random.uniform(5, 12),
-                "m3000f2": np.random.uniform(2.5, 4.0),
-                "h_prime_f2": np.random.uniform(250, 350),
-                "foe": np.random.uniform(2, 5),
+                "fof2": rng.uniform(5, 12),
+                "m3000f2": rng.uniform(2.5, 4.0),
+                "h_prime_f2": rng.uniform(250, 350),
+                "foe": rng.uniform(2, 5),
             },
             quality=1.0,
         )

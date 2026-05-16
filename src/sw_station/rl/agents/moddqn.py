@@ -34,6 +34,8 @@ class MODDQNConfig:
     hidden_size: int = 256
     # 目标数量
     n_objectives: int = 3
+    # 多目标奖励权重
+    reward_weights: dict = None  # 若为None，自动从env配置继承
     # 设备
     device: str = "auto"
 
@@ -391,7 +393,11 @@ class MODDQNAgent:
             # r1: throughput (正奖励), r2: delay (负), r3: interference (负)
             # 从标量回报分解：通过 reward_info 中的各分量
             # 简化：将标量回报按目标权重分配到各目标头
-            w = torch.tensor([0.5, 0.3, 0.2], device=self.device)  # 与 env 的 reward_weights 一致
+            rw = self.config.reward_weights or {"throughput": 0.5, "delay": 0.3, "interference": 0.2}
+            w = torch.tensor(
+                [rw.get("throughput", 0.5), rw.get("delay", 0.3), rw.get("interference", 0.2)],
+                device=self.device
+            )
             multi_rewards = rewards.unsqueeze(1) * w.unsqueeze(0)  # (batch, n_obj)
             target_q = multi_rewards + self.config.gamma * next_q * (1 - dones.unsqueeze(1))
 

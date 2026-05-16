@@ -297,6 +297,7 @@ class AntennaPatternCube:
         peak_gain: float = 10.0,
         beamwidth_az: float = 60.0,
         beamwidth_el: float = 30.0,
+        seed: int = None,
     ) -> "AntennaPatternCube":
         """
         创建合成天线方向图（用于测试和演示）
@@ -348,7 +349,8 @@ class AntennaPatternCube:
                     )
 
         # 添加一些随机扰动使其更真实
-        noise = np.random.normal(0, 0.5, gain_pattern.shape)
+        rng = np.random.default_rng(seed)
+        noise = rng.normal(0, 0.5, gain_pattern.shape)
         gain_pattern = np.clip(gain_pattern + noise, -30, peak_gain + 2)
 
         return cls(

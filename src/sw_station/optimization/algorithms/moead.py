@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Optional, Callable
 
@@ -119,6 +120,7 @@ class MOEADRunner:
         """
         algorithm = self.create_algorithm(problem)
 
+        start_time = time.perf_counter()
         res = minimize(
             problem,
             algorithm,
@@ -129,6 +131,7 @@ class MOEADRunner:
         )
 
         # 提取结果
+        elapsed = time.perf_counter() - start_time
         pareto_front, pareto_solutions = extract_pareto_front(res.F, res.X)
         hv = calculate_hypervolume(pareto_front)
 
@@ -139,7 +142,7 @@ class MOEADRunner:
             all_solutions=res.X,
             n_generations=res.algorithm.n_gen if hasattr(res.algorithm, 'n_gen') else 0,
             hypervolume=hv,
-            execution_time=0.0,
+            execution_time=elapsed,
         )
 
         return self.result
@@ -193,8 +196,8 @@ class MOEADwithDecomposition(MOEADRunner):
 
         使用电荷模拟法生成均匀分布的权重向量。
         """
-        # 简化实现：使用随机初始化 + 迭代优化
-        weights = np.random.rand(n_points, n_obj)
+        rng = np.random.default_rng(self.config.seed)
+        weights = rng.random((n_points, n_obj))
         weights = weights / weights.sum(axis=1, keepdims=True)
 
         # 迭代优化使权重更均匀
@@ -217,7 +220,8 @@ class MOEADwithDecomposition(MOEADRunner):
 
     def _random_weights(self, n_obj: int, n_points: int) -> np.ndarray:
         """随机权重生成"""
-        weights = np.random.dirichlet(np.ones(n_obj), n_points)
+        rng = np.random.default_rng(self.config.seed)
+        weights = rng.dirichlet(np.ones(n_obj), n_points)
         return weights
 
 
