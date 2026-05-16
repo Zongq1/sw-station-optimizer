@@ -100,41 +100,33 @@ class GroundWavePropagation:
         distance: float,
     ) -> float:
         """
-        计算地面损耗修正
+        计算地面损耗修正 - 基于 ITU-R P.368 数值距离
 
-        Parameters
-        ----------
-        frequency : float
-            频率 (MHz)
-        distance : float
-            距离 (km)
-
-        Returns
-        -------
-        float
-            损耗修正 (dB)
+        使用归一化电导率参数和数值距离的连续函数。
         """
-        # 简化模型
         sigma = self.ground_conductivity
+        epsilon_r = self.ground_permittivity
 
-        # 归一化参数
-        # 高电导率（海水）损耗小，低电导率（干燥地面）损耗大
-        if sigma > 1.0:  # 海水
-            base_loss = -5.0
-        elif sigma > 0.01:  # 良好地面
-            base_loss = -15.0
-        elif sigma > 0.001:  # 一般地面
-            base_loss = -25.0
-        else:  # 干燥地面
-            base_loss = -35.0
+        # 归一化电导率: x = 1.8e10 * sigma / f(Hz)
+        f_hz = frequency * 1e6
+        x = 1.8e10 * sigma / f_hz if f_hz > 0 else 1.0
 
-        # 频率越高，地面损耗越大
-        freq_factor = 10 * np.log10(frequency)
+        # 数值距离: p = pi * d(m) / (lambda * x)
+        wavelength = 3e8 / f_hz if f_hz > 0 else 1.0
+        d_m = distance * 1e3
+        p = (np.pi * d_m) / (wavelength * x) if x > 0 and wavelength > 0 else 1.0
+        p = max(p, 0.01)
 
-        # 距离因子
-        dist_factor = 5 * np.log10(distance)
+        # 地波衰减因子（连续函数，无阶梯跳变）
+        # 基于 Millington 近似：场强衰减随 p 增加
+        # 高 sigma (海水) -> x 大 -> p 小 -> 衰减小
+        # 低 sigma (干燥地) -> x 小 -> p 大 -> 衰减大
+        attenuation = -10 * np.log10(1 + 0.1 * p ** 0.9)
 
-        return base_loss + freq_factor + dist_factor
+        # 介电常数修正
+        epsilon_factor = 1.0 / (1.0 + (epsilon_r - 5) * 0.01)
+
+        return attenuation * epsilon_factor
 
     def calculate_path_loss(
         self,
@@ -172,29 +164,27 @@ class GroundWavePropagation:
         """
         计算相对于自由空间的附加损耗
 
-        Parameters
-        ----------
-        frequency : float
-            频率 (MHz)
-        distance : float
-            距离 (km)
-
-        Returns
-        -------
-        float
-            附加损耗 (dB)
+        基于 ITU-R P.368 的数值距离概念。
         """
         sigma = self.ground_conductivity
 
-        # 数值距离参数
-        nu = (np.pi * distance * 1e3 * frequency * 1e6) / (3e8)
-        nu = max(nu, 0.01)
+        # 数值距离 p = pi*d/(lambda * x)
+        # x = 1.8e10 * sigma / f
+        f_hz = frequency * 1e6
+        x = 1.8e10 * sigma / f_hz if f_hz > 0 else 1.0
+        wavelength = 3e8 / f_hz if f_hz > 0 else 1.0
+        d_m = distance * 1e3
 
-        # 基于地面电导率的衰减系数
-        alpha = 1.0 / (1.0 + sigma * 1e6 / (frequency * 1e6))
+        if x <= 0 or wavelength <= 0:
+            return 0.0
 
-        # 附加损耗
-        excess = alpha * 10 * np.log10(1 + nu)
+        p = np.pi * d_m / (wavelength * x)
+        p = max(p, 0.01)
+
+        # 附加损耗 = f(p)，单调递增
+        # 小 p (近/良导体): 接近自由空间
+        # 大 p (远/差导体): 附加损耗增大
+        excess = 10 * np.log10(1 + 2 * p ** 0.85)
 
         return max(excess, 0.0)
 
@@ -280,8 +270,13 @@ class GroundWavePropagation:
             frequency, tx_power_dbw, tx_gain_dbi
         )
 
-        # 简化可用性判断
-        is_feasible = field_strength > 20.0  # dB(uV/m)
+        # 可用性判断基于接收机灵敏度和噪声电平
+        # ITU-R P.372 大气噪声：短波段典型 20-40 dB(uV/m)
+        # 1 MHz 带宽参考，3 kHz 信道带宽修正约 -25 dB
+        atmospheric_noise = 30.0  # dB(uV/m) 典型值
+        receiver_threshold = 20.0  # dB(uV/m) 典型接收机门限
+        min_field_strength = max(atmospheric_noise, receiver_threshold)
+        is_feasible = field_strength > min_field_strength
 
         return GroundWaveResult(
             frequency=frequency,

@@ -64,6 +64,9 @@ class DigitalTwinEngine:
         self.em_simulator = EMSimulator()
         self.propagation_engine = SkyWavePropagation()
 
+        # 干扰阈值
+        self.interference_threshold = -130.0  # dBm
+
         # 状态
         self.current_time = 0.0
         self.is_running = False
@@ -92,11 +95,26 @@ class DigitalTwinEngine:
 
     def _initialize_layers(self) -> None:
         """初始化各层状态"""
-        # PET: 物理环境
+        # PET: 物理环境 - 加载地形和电导率数据
+        positions = np.array([ant.position for ant in self.station.antennas])
         self._layer_states[TwinLayer.PHYSICAL_ENVIRONMENT] = {
             "terrain_loaded": True,
+            "terrain_resolution": 10.0,  # 米
+            "elevation_range": (
+                float(positions[:, 2].min()),
+                float(positions[:, 2].max()),
+            ),
             "buildings_loaded": True,
+            "n_buildings": 0,  # 简化：无建筑物数据
             "conductivity_map": True,
+            "ground_conductivity": self.em_simulator.ground_conductivity,
+            "ground_permittivity": self.em_simulator.ground_permittivity,
+            "boundary": (
+                float(positions[:, 0].min()),
+                float(positions[:, 0].max()),
+                float(positions[:, 1].min()),
+                float(positions[:, 1].max()),
+            ),
         }
 
         # PDT: 物理设备
@@ -111,10 +129,15 @@ class DigitalTwinEngine:
         # CT: 信道预测
         self._update_channel_state()
 
-        # DT: 决策优化
+        # DT: 决策优化层
         self._layer_states[TwinLayer.DECISION] = {
             "optimization_active": False,
             "rl_agent_active": False,
+            "last_optimization_time": 0.0,
+            "last_rl_decision_time": 0.0,
+            "optimization_result": None,
+            "rl_action_history": [],
+            "n_decisions_made": 0,
         }
 
     def update(self, time_delta: float = 1.0) -> dict:
@@ -168,13 +191,22 @@ class DigitalTwinEngine:
                     ant_i = self.station.antennas[i]
                     ant_j = self.station.antennas[j]
 
+                    # 使用天线实际工作频率
+                    freq = 15.0
+                    if ant_i.current_frequency and ant_j.current_frequency:
+                        freq = (ant_i.current_frequency + ant_j.current_frequency) / 2
+                    elif ant_i.current_frequency:
+                        freq = ant_i.current_frequency
+                    elif ant_j.current_frequency:
+                        freq = ant_j.current_frequency
+
                     isolation = self.em_simulator.calculate_isolation(
-                        ant_i, ant_j, 15.0
+                        ant_i, ant_j, freq
                     )
 
                     # 检查是否违规
                     interference = ant_i.current_power - isolation
-                    if interference > -130.0:  # 阈值
+                    if interference > self.interference_threshold:
                         event = InterferenceEvent(
                             timestamp=self.current_time,
                             tx_antenna_id=ant_i.id,
@@ -183,7 +215,7 @@ class DigitalTwinEngine:
                             rx_frequency=ant_j.current_frequency or 0,
                             tx_power=ant_i.current_power,
                             interference_power=interference,
-                            allowed_power=-130.0,
+                            allowed_power=self.interference_threshold,
                             isolation=isolation,
                         )
                         interference_events.append(event)
@@ -209,14 +241,37 @@ class DigitalTwinEngine:
                 ))
 
     def _update_channel_state(self) -> None:
-        """更新信道预测层"""
+        """更新信道预测层 - 调用传播引擎"""
         ionosphere = self.station.ionospheric_state
+        hour = (self.current_time / 3600) % 24
+
+        # 更新电离层状态的昼夜变化
+        if 6 <= hour <= 18:
+            ionosphere.fof2 = 8.0 + 4.0 * np.sin(np.pi * (hour - 6) / 12)
+        else:
+            ionosphere.fof2 = 5.0
+
+        # 调用传播引擎计算典型路径的 MUF/LUF
+        typical_distance = 1000.0  # km
+        muf = self.propagation_engine.calculate_muf(typical_distance, ionosphere)
+        luf = self.propagation_engine.calculate_luf(typical_distance, ionosphere)
+
+        # 计算最佳频率
+        optimal_freq, optimal_snr = self.propagation_engine.find_optimal_frequency(
+            typical_distance, ionosphere
+        )
 
         self._layer_states[TwinLayer.CHANNEL] = {
-            "muf": ionosphere.muf_3000,
+            "muf": muf,
+            "luf": luf,
+            "optimal_frequency": optimal_freq,
+            "optimal_snr": optimal_snr,
             "fof2": ionosphere.fof2,
+            "fof1": ionosphere.fof1,
+            "foe": ionosphere.foe,
             "solar_flux": ionosphere.solar_flux_107,
-            "time_of_day": "day" if 6 <= (self.current_time / 3600) % 24 <= 18 else "night",
+            "h_prime_f2": ionosphere.h_prime_f2,
+            "time_of_day": "day" if 6 <= hour <= 18 else "night",
         }
 
     def _process_events(self) -> None:
@@ -237,6 +292,28 @@ class DigitalTwinEngine:
     def _emit_event(self, event: TwinEvent) -> None:
         """发送事件"""
         self.event_queue.append(event)
+
+    def activate_optimization(self) -> None:
+        """激活优化决策"""
+        self._layer_states[TwinLayer.DECISION]["optimization_active"] = True
+        self._layer_states[TwinLayer.DECISION]["last_optimization_time"] = self.current_time
+
+    def activate_rl_agent(self) -> None:
+        """激活 RL 决策"""
+        self._layer_states[TwinLayer.DECISION]["rl_agent_active"] = True
+        self._layer_states[TwinLayer.DECISION]["last_rl_decision_time"] = self.current_time
+
+    def record_decision(self, action: dict) -> None:
+        """记录决策动作"""
+        dt_state = self._layer_states[TwinLayer.DECISION]
+        dt_state["rl_action_history"].append({
+            "time": self.current_time,
+            "action": action,
+        })
+        dt_state["n_decisions_made"] += 1
+        # 保留最近 100 条
+        if len(dt_state["rl_action_history"]) > 100:
+            dt_state["rl_action_history"] = dt_state["rl_action_history"][-100:]
 
     def register_handler(self, event_type: str, handler: Callable) -> None:
         """

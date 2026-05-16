@@ -33,7 +33,7 @@ class GaussianProcess:
 
     def fit(self, X: np.ndarray, y: np.ndarray) -> None:
         """
-        训练高斯过程
+        训练高斯过程（含超参数优化）
 
         Parameters
         ----------
@@ -44,6 +44,10 @@ class GaussianProcess:
         """
         self.X_train = X.copy()
         self.y_train = y.copy()
+
+        # 通过最小化负边际似然优化超参数
+        if len(X) >= 3:
+            self._optimize_hyperparameters(X, y)
 
         # 计算核矩阵
         K = self._kernel(X, X)
@@ -103,6 +107,40 @@ class GaussianProcess:
         # 计算欧氏距离
         dists = np.sum((X1[:, np.newaxis, :] - X2[np.newaxis, :, :]) ** 2, axis=2)
         return self.signal_variance * np.exp(-0.5 * dists / self.length_scale**2)
+
+    def _optimize_hyperparameters(self, X: np.ndarray, y: np.ndarray) -> None:
+        """通过最大化边际似然优化超参数"""
+        from scipy.optimize import minimize as scipy_minimize_opt
+
+        def neg_log_likelihood(params):
+            ls, sv, nv = np.exp(params)  # 对数空间优化保证正值
+            old_ls, old_sv, old_nv = self.length_scale, self.signal_variance, self.noise_variance
+            self.length_scale, self.signal_variance, self.noise_variance = ls, sv, nv
+
+            K = self._kernel(X, X)
+            K += nv * np.eye(len(X))
+
+            try:
+                L = np.linalg.cholesky(K + 1e-6 * np.eye(len(X)))
+                alpha = np.linalg.solve(L.T, np.linalg.solve(L, y))
+                log_det = 2 * np.sum(np.log(np.diag(L)))
+                nll = 0.5 * y @ alpha + 0.5 * log_det
+            except np.linalg.LinAlgError:
+                nll = 1e10
+
+            self.length_scale, self.signal_variance, self.noise_variance = old_ls, old_sv, old_nv
+            return nll
+
+        x0 = np.log([self.length_scale, self.signal_variance, self.noise_variance])
+        try:
+            result = scipy_minimize_opt(neg_log_likelihood, x0, method='Nelder-Mead')
+            if result.success:
+                ls, sv, nv = np.exp(result.x)
+                self.length_scale = np.clip(ls, 0.01, 100.0)
+                self.signal_variance = np.clip(sv, 0.01, 100.0)
+                self.noise_variance = np.clip(nv, 1e-6, 1.0)
+        except Exception:
+            pass
 
 
 @dataclass
@@ -275,10 +313,18 @@ class MPSOptimizer:
         # 获取目标模型预测
         target_mean, target_var = self.target_models[target_idx].predict(X)
 
-        # 加权融合
-        weights = self._calculate_source_weights(
-            np.zeros(1)  # 简化：使用零向量作为签名
-        )
+        # 使用目标问题的变量统计作为签名
+        if len(self.X_history) > 0:
+            X_all = np.array(self.X_history)
+            # 签名 = [变量均值, 变量标准差, 变量范围]
+            target_signature = np.concatenate([
+                X_all.mean(axis=0)[:5],  # 前5维均值
+                X_all.std(axis=0)[:5],   # 前5维标准差
+            ])
+        else:
+            target_signature = np.zeros(10)
+
+        weights = self._calculate_source_weights(target_signature)
 
         # 堆叠预测
         stacked_mean = np.zeros_like(target_mean)
@@ -288,8 +334,26 @@ class MPSOptimizer:
             stacked_mean += w * source_means[i]
             stacked_var += w**2 * source_vars[i]
 
-        # 结合目标模型
-        alpha = 0.5  # 目标模型权重
+        # 目标模型权重 - 基于交叉验证误差
+        if len(self.X_history) >= 5:
+            # 简化留一法：用最后 20% 数据估计目标模型误差
+            n_val = max(1, len(self.X_history) // 5)
+            X_val = np.array(self.X_history[-n_val:])
+            y_val = np.array(self.y_history[-n_val:])
+            target_pred, _ = self.target_models[target_idx].predict(X_val)
+            target_mse = np.mean((target_pred - y_val[:, target_idx])**2)
+
+            # 源模型误差
+            source_pred_mse = 0.0
+            for i, source in enumerate(self.source_models):
+                pred, _ = source.gp_model.predict(X_val)
+                source_pred_mse += weights[i] * np.mean((pred - y_val[:, target_idx])**2)
+
+            # 自适应权重：误差小的模型权重高
+            total_error = target_mse + source_pred_mse + 1e-10
+            alpha = np.clip(source_pred_mse / total_error, 0.1, 0.9)
+        else:
+            alpha = 0.5
         final_mean = alpha * target_mean + (1 - alpha) * stacked_mean
         final_var = alpha * target_var + (1 - alpha) * stacked_var
 
@@ -358,16 +422,36 @@ class MPSOptimizer:
             else:
                 best_val = 0.0
 
-            # 随机搜索找 EI 最大的点
-            candidates = np.random.uniform(
-                [b[0] for b in bounds],
-                [b[1] for b in bounds],
-                size=(1000, n_vars),
-            )
+            # 多起点 L-BFGS-B 优化找 EI 最大的点
+            lb = np.array([b[0] for b in bounds])
+            ub = np.array([b[1] for b in bounds])
 
-            ei_values = self.expected_improvement(candidates, best_val, obj_idx)
-            top_indices = np.argsort(ei_values)[-n_points:]
-            best_points.append(candidates[top_indices])
+            # 随机起点
+            n_starts = min(50, 10 * n_vars)
+            start_points = np.random.uniform(lb, ub, size=(n_starts, n_vars))
+
+            ei_optimal_points = []
+            for x0 in start_points:
+                try:
+                    result = scipy_minimize(
+                        lambda x: -self.expected_improvement(
+                            x.reshape(1, -1), best_val, obj_idx
+                        )[0],
+                        x0,
+                        method='L-BFGS-B',
+                        bounds=list(zip(lb, ub)),
+                    )
+                    if result.success:
+                        ei_optimal_points.append(result.x)
+                except Exception:
+                    pass
+
+            if len(ei_optimal_points) < n_points:
+                # 补充随机候选
+                extra = np.random.uniform(lb, ub, size=(n_points - len(ei_optimal_points), n_vars))
+                ei_optimal_points.extend(extra)
+
+            best_points.append(np.array(ei_optimal_points[:n_points]))
 
         # 合并所有目标的推荐点
         all_points = np.vstack(best_points)
@@ -392,8 +476,16 @@ class MPSOptimizer:
         y_new : np.ndarray
             新增输出
         """
-        self.X_history.extend(X_new)
-        self.y_history.extend(y_new)
+        if isinstance(X_new, np.ndarray):
+            for x in X_new:
+                self.X_history.append(x)
+        else:
+            self.X_history.extend(X_new)
+        if isinstance(y_new, np.ndarray):
+            for y in y_new:
+                self.y_history.append(y)
+        else:
+            self.y_history.extend(y_new)
 
         # 重新训练目标模型
         X_all = np.array(self.X_history)

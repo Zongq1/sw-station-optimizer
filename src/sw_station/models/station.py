@@ -83,6 +83,12 @@ class AntennaDevice:
         abs_az = (az + self.azimuth) % 360.0
         return self.pattern.get_gain(freq, abs_az, el)
 
+    @property
+    def max_dimension(self) -> float:
+        """天线最大物理尺寸 (米)"""
+        from .antenna import ANTENNA_MAX_DIMENSIONS
+        return ANTENNA_MAX_DIMENSIONS.get(self.antenna_type, 20.0)
+
     def distance_to(self, other: "AntennaDevice") -> float:
         """
         计算到另一副天线的距离

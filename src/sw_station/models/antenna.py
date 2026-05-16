@@ -22,6 +22,19 @@ class AntennaType(Enum):
     ARRAY_HORIZONTAL = "array_horizontal"  # 水平阵列
 
 
+# 各类型天线的典型最大物理尺寸 (米)
+ANTENNA_MAX_DIMENSIONS: dict[AntennaType, float] = {
+    AntennaType.YAGI: 12.0,
+    AntennaType.LOG_PERIODIC: 8.0,
+    AntennaType.DIPOLE: 5.0,
+    AntennaType.MONOPOLE: 10.0,
+    AntennaType.RHOMBIC: 60.0,
+    AntennaType.CAGE: 15.0,
+    AntennaType.ARRAY_VERTICAL: 20.0,
+    AntennaType.ARRAY_HORIZONTAL: 25.0,
+}
+
+
 @dataclass
 class AntennaPatternCube:
     """

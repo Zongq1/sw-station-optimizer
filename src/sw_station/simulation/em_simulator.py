@@ -25,6 +25,7 @@ class EMSimulator:
         self,
         ground_conductivity: float = 0.01,  # S/m
         ground_permittivity: float = 13.0,
+        iip3: float = 10.0,
     ):
         """
         初始化电磁仿真器
@@ -35,9 +36,12 @@ class EMSimulator:
             地表电导率 (S/m)
         ground_permittivity : float
             地表相对介电常数
+        iip3 : float
+            三阶输入截点 (dBm)
         """
         self.ground_conductivity = ground_conductivity
         self.ground_permittivity = ground_permittivity
+        self.iip3 = iip3  # dBm, 三阶输入截点
 
     def calculate_isolation(
         self,
@@ -154,40 +158,34 @@ class EMSimulator:
         el_tx: float,
         el_rx: float,
     ) -> float:
-        """
-        计算地面反射损耗
-
-        基于 ITU-R P.368 的简化模型
-
-        Parameters
-        ----------
-        frequency : float
-            频率 (MHz)
-        distance : float
-            距离 (米)
-        el_tx, el_rx : float
-            发射/接收仰角 (度)
-
-        Returns
-        -------
-        float
-            地面反射损耗 (dB)
-        """
-        # 简化模型：基于电导率和频率的衰减
-        # 实际应用中应使用更复杂的地波传播模型
+        """计算地面反射损耗 - 基于 Fresnel 反射系数"""
         sigma = self.ground_conductivity
         epsilon_r = self.ground_permittivity
 
-        # 归一化电导率参数
-        x = 1.8e3 * sigma / frequency  # 常用简化公式
+        # 相对介电常数（复数）
+        # epsilon_c = epsilon_r - j*sigma/(omega*epsilon_0)
+        omega = 2 * np.pi * frequency * 1e6
+        epsilon_0 = 8.854e-12
+        epsilon_c_imag = sigma / (omega * epsilon_0)
 
-        # 仰角因子（低仰角时地面影响更大）
-        el_factor = np.cos(np.radians(min(el_tx, el_rx)))
+        # 入射角（取平均仰角）
+        theta_i = np.radians(max(1.0, min(el_tx, el_rx)))
+        cos_theta = np.cos(theta_i)
+        sin_theta = np.sin(theta_i)
 
-        # 简化的地面损耗估算
-        ground_loss = 10 * np.log10(1 + x * el_factor**2)
+        # 垂直极化 Fresnel 反射系数
+        sqrt_term = np.sqrt(epsilon_r - sin_theta**2 + 1j * epsilon_c_imag)
+        R_v = (epsilon_r * cos_theta - sqrt_term) / (epsilon_r * cos_theta + sqrt_term)
 
-        return max(ground_loss, 0.0)
+        # 反射损耗 = -20*log10(|R|)，低仰角时接近 0 dB（全反射），高仰角时较大
+        reflection_coeff = abs(R_v)
+        reflection_coeff = np.clip(reflection_coeff, 0.01, 1.0)
+        ground_loss = -20 * np.log10(reflection_coeff)
+
+        # 距离因子：距离越远，地面反射路径影响越小
+        dist_factor = 1.0 / (1.0 + distance / 1000.0)
+
+        return max(ground_loss * dist_factor, 0.0)
 
     def calculate_mutual_coupling(
         self,
@@ -213,11 +211,17 @@ class EMSimulator:
         isolation_db = self.calculate_isolation(antenna1, antenna2, frequency)
         # S21 幅值
         s21_mag = 10 ** (-isolation_db / 20)
-        # 随机相位（简化）
-        s21_phase = np.random.uniform(0, 2 * np.pi)
+        # 相位由传播路径长度决定: phi = 2*pi*d/lambda
+        distance = antenna1.distance_to(antenna2)
+        wavelength = self.SPEED_OF_LIGHT / (frequency * 1e6)
+        s21_phase = 2 * np.pi * distance / wavelength
         return s21_mag * np.exp(1j * s21_phase)
 
-    def calculate_near_field_boundary(self, frequency_mhz: float) -> float:
+    def calculate_near_field_boundary(
+        self,
+        frequency_mhz: float,
+        max_dimension: float = 20.0,
+    ) -> float:
         """
         计算近场-远场边界距离
 
@@ -227,6 +231,8 @@ class EMSimulator:
         ----------
         frequency_mhz : float
             频率 (MHz)
+        max_dimension : float
+            天线最大物理尺寸 (米)
 
         Returns
         -------
@@ -234,8 +240,6 @@ class EMSimulator:
             远场边界距离 (米)
         """
         wavelength = self.SPEED_OF_LIGHT / (frequency_mhz * 1e6)
-        # 假设天线最大尺寸为 20 米
-        max_dimension = 20.0
         return 2 * max_dimension**2 / wavelength
 
     def check_mutual_coupling_regime(
@@ -260,7 +264,8 @@ class EMSimulator:
             "near_field" 或 "far_field"
         """
         distance = antenna1.distance_to(antenna2)
-        boundary = self.calculate_near_field_boundary(frequency)
+        max_dim = max(antenna1.max_dimension, antenna2.max_dimension)
+        boundary = self.calculate_near_field_boundary(frequency, max_dim)
         return "near_field" if distance < boundary else "far_field"
 
     def calculate_intermodulation_power(
@@ -290,8 +295,7 @@ class EMSimulator:
             return -np.inf
 
         # 简化模型：P_IM = P1 + P2 - (n-1)*IIP3
-        # IIP3 取决于接收机特性，这里使用简化假设
-        iip3 = 10.0  # dBm, 典型值
+        iip3 = self.iip3
 
         # 考虑隔离度后的等效输入功率
         effective_powers = [p - iso for p, iso in zip(tx_powers, isolations)]

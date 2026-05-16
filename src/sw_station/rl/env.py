@@ -178,7 +178,9 @@ class ShortwaveStationEnv(gym.Env):
         antenna_id, channel_id, power_level = action
 
         # 解析动作
-        power_dbm = 10 + power_level * 3  # 10-37 dBm
+        # 功率等级映射为对数分布 (dBm): 10, 13, 16, 20, 23, 27, 30, 33, 37, 40
+        power_levels = np.array([10, 13, 16, 20, 23, 27, 30, 33, 37, 40])
+        power_dbm = float(power_levels[min(int(power_level), len(power_levels) - 1)])
 
         # 获取当前任务
         if len(self.task_queue) == 0:
@@ -372,8 +374,20 @@ class ShortwaveStationEnv(gym.Env):
             antenna_status[i, 1] = (ant.current_frequency or 0) / 30.0
             antenna_status[i, 2] = (ant.current_power or 0) / 50.0
 
-        # 信道质量（简化）
-        channel_quality = np.random.uniform(0.3, 1.0, (self.n_channels, 3)).astype(np.float32)
+        # 信道质量 - 基于传播引擎计算
+        from ..simulation.propagation import SkyWavePropagation
+        propagation = SkyWavePropagation()
+        channel_quality = np.zeros((self.n_channels, 3), dtype=np.float32)
+        default_distance = 1000.0  # 默认参考距离 1000 km
+        for ch in range(self.n_channels):
+            freq = self._channel_to_frequency(ch)
+            channel = propagation.evaluate_channel(
+                freq, default_distance, self.ionosphere,
+            )
+            # [质量评分, 可用度, SNR归一化]
+            channel_quality[ch, 0] = np.clip(channel.quality_score(), 0, 1)
+            channel_quality[ch, 1] = np.clip(channel.availability, 0, 1)
+            channel_quality[ch, 2] = np.clip(channel.snr / 40.0, 0, 1)
 
         # 任务队列
         pending_tasks = np.zeros((self.n_pending_tasks, 4), dtype=np.float32)
@@ -381,14 +395,14 @@ class ShortwaveStationEnv(gym.Env):
             pending_tasks[i, 0] = task.target_azimuth / 360.0
             pending_tasks[i, 1] = task.target_elevation / 90.0
             pending_tasks[i, 2] = task.priority / 5.0
-            pending_tasks[i, 3] = 1.0  # 紧急度
+            pending_tasks[i, 3] = task.priority / 5.0  # 紧急度与优先级关联
 
-        # 电离层状态
+        # 电离层状态 - 完整参数
         ionosphere = np.array([
             self.ionosphere.muf_3000 / 30.0,
             self.ionosphere.fof2 / 15.0,
             self.ionosphere.solar_sunspot_number / 200.0,
-            0.5,  # 占位
+            self.ionosphere.h_prime_f2 / 400.0,  # F2层虚高归一化
         ], dtype=np.float32)
 
         return {
@@ -429,13 +443,29 @@ class ShortwaveStationEnv(gym.Env):
         return freq_min + (freq_max - freq_min) * channel_id / self.n_channels
 
     def _update_ionosphere(self) -> None:
-        """更新电离层状态"""
-        # 简化的昼夜变化
+        """更新电离层状态 - 完整昼夜变化模型"""
         hour = (self.current_step / 100) % 24
+
+        # foF2 昼夜变化
         if 6 <= hour <= 18:
-            self.ionosphere.fof2 = 8.0 + 2.0 * np.sin(np.pi * (hour - 6) / 12)
+            # 白天：正弦变化，中午最高
+            self.ionosphere.fof2 = 8.0 + 4.0 * np.sin(np.pi * (hour - 6) / 12)
+            self.ionosphere.fof1 = 4.0 + 2.0 * np.sin(np.pi * (hour - 6) / 12)
+            self.ionosphere.foe = 2.5 + 1.5 * np.sin(np.pi * (hour - 6) / 12)
         else:
-            self.ionosphere.fof2 = 6.0
+            # 夜间
+            self.ionosphere.fof2 = 5.0
+            self.ionosphere.fof1 = 0.0  # F1层夜间消失
+            self.ionosphere.foe = 1.0
+
+        # M(3000)F2 随 foF2 变化
+        self.ionosphere.m3000f2 = 2.5 + 0.5 * (self.ionosphere.fof2 / 10.0)
+
+        # F2层虚高：白天低（~250km），夜间高（~350km）
+        if 6 <= hour <= 18:
+            self.ionosphere.h_prime_f2 = 250.0 + 50.0 * np.cos(np.pi * (hour - 12) / 6)
+        else:
+            self.ionosphere.h_prime_f2 = 350.0
 
     def render(self) -> Optional[str]:
         """渲染环境状态"""

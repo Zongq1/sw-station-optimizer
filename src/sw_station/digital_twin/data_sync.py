@@ -146,10 +146,35 @@ class DataSynchronizer:
         power = payload.get("power", 0)  # dBm
         grid = payload.get("grid", "")
 
-        # 更新信道状态（如果有台站引用）
+        # 提取传播特征用于 ML 残差校正
         if self.station and frequency > 0:
-            # 简化：记录 SNR 数据用于后续分析
-            pass
+            # 计算预测 SNR（基于传播引擎）
+            from ..simulation.propagation import SkyWavePropagation
+            propagation = SkyWavePropagation()
+
+            # 估算传播距离（简化：基于网格定位）
+            distance = self._estimate_distance_from_grid(grid)
+
+            channel = propagation.evaluate_channel(
+                frequency, distance, self.station.ionospheric_state,
+                tx_power_dbm=power,
+            )
+
+            # 残差 = 实测 SNR - 预测 SNR
+            snr_residual = snr - channel.snr
+
+            # 存储残差特征
+            if not hasattr(self, '_wspr_residuals'):
+                self._wspr_residuals = []
+            self._wspr_residuals.append({
+                "frequency": frequency,
+                "distance": distance,
+                "residual": snr_residual,
+                "time": record.timestamp,
+            })
+            # 保留最近 1000 条
+            if len(self._wspr_residuals) > 1000:
+                self._wspr_residuals = self._wspr_residuals[-1000:]
 
     def _process_psk_reporter(self, record: DataRecord) -> None:
         """
@@ -165,9 +190,21 @@ class DataSynchronizer:
         snr = payload.get("snr", 0)
         mode = payload.get("mode", "")
 
-        # 用于传播路径分析
+        # 传播路径质量分析
         if self.station and frequency > 0:
-            pass
+            if not hasattr(self, '_psk_path_data'):
+                self._psk_path_data = []
+
+            self._psk_path_data.append({
+                "sender": sender,
+                "receiver": receiver,
+                "frequency": frequency,
+                "snr": snr,
+                "mode": mode,
+                "time": record.timestamp,
+            })
+            if len(self._psk_path_data) > 1000:
+                self._psk_path_data = self._psk_path_data[-1000:]
 
     def _process_rbn(self, record: DataRecord) -> None:
         """
@@ -182,9 +219,80 @@ class DataSynchronizer:
         frequency = payload.get("frequency", 0)
         snr = payload.get("snr", 0)
 
-        # 用于实时传播监控
+        # 实时传播质量监控
         if self.station and frequency > 0:
-            pass
+            if not hasattr(self, '_rbn_monitor'):
+                self._rbn_monitor = {}
+
+            key = f"{beacon}_{receiver}_{round(frequency, 0)}"
+            if key not in self._rbn_monitor:
+                self._rbn_monitor[key] = {"snr_history": [], "last_update": 0.0}
+
+            self._rbn_monitor[key]["snr_history"].append(snr)
+            self._rbn_monitor[key]["last_update"] = record.timestamp
+
+            # 保留最近 100 个观测
+            if len(self._rbn_monitor[key]["snr_history"]) > 100:
+                self._rbn_monitor[key]["snr_history"] = \
+                    self._rbn_monitor[key]["snr_history"][-100:]
+
+    def _estimate_distance_from_grid(self, grid: str) -> float:
+        """
+        从 Maidenhead 网格定位估算距离（简化）
+
+        Parameters
+        ----------
+        grid : str
+            Maidenhead 网格定位符（如 FN31）
+
+        Returns
+        -------
+        float
+            估算距离 (km)
+        """
+        if len(grid) < 4:
+            return 1000.0  # 默认距离
+
+        # 简化：将网格转换为大致距离
+        # 假设台站在 FN31 附近
+        try:
+            ref_lat = 40.0 + (ord(grid[1]) - ord('N')) * 10 + int(grid[3]) * 1
+            ref_lon = -70.0 + (ord(grid[0]) - ord('F')) * 20 + int(grid[2]) * 2
+            # 简化距离估算
+            distance = np.sqrt((ref_lat - 40)**2 + (ref_lon + 70)**2) * 111  # ~111km/度
+            return max(distance, 100.0)
+        except (ValueError, IndexError):
+            return 1000.0
+
+    def get_snr_residual_stats(self) -> dict:
+        """获取 SNR 残差统计信息"""
+        if not hasattr(self, '_wspr_residuals') or len(self._wspr_residuals) == 0:
+            return {"mean": 0.0, "std": 0.0, "count": 0}
+
+        residuals = [r["residual"] for r in self._wspr_residuals]
+        return {
+            "mean": float(np.mean(residuals)),
+            "std": float(np.std(residuals)),
+            "count": len(residuals),
+            "freq_mean": float(np.mean([r["frequency"] for r in self._wspr_residuals])),
+        }
+
+    def get_rbn_quality_report(self) -> dict:
+        """获取 RBN 传播质量报告"""
+        if not hasattr(self, '_rbn_monitor'):
+            return {}
+
+        report = {}
+        for key, data in self._rbn_monitor.items():
+            snr_hist = data["snr_history"]
+            if len(snr_hist) > 0:
+                report[key] = {
+                    "mean_snr": float(np.mean(snr_hist)),
+                    "std_snr": float(np.std(snr_hist)),
+                    "n_observations": len(snr_hist),
+                    "last_update": data["last_update"],
+                }
+        return report
 
     def _process_ionosonde(self, record: DataRecord) -> None:
         """

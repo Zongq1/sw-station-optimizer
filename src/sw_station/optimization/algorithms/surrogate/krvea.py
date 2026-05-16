@@ -24,6 +24,8 @@ class KRVEAConfig:
     initial_sample_size: int = 50
     # 参考向量更新频率
     ref_vector_update_freq: int = 50
+    # 每批评估数量
+    batch_size: int = 10
     # 随机种子
     seed: Optional[int] = None
 
@@ -68,8 +70,23 @@ class ReferenceVectorAdaptor:
             vectors = np.array(vectors)
             vectors = vectors / vectors.sum(axis=1, keepdims=True)
         else:
-            # 高维：随机初始化
-            vectors = np.random.dirichlet(np.ones(self.n_objectives), self.n_vectors)
+            # 高维：使用 Das-Dennis 方法生成系统化参考向量
+            from pymoo.util.ref_dirs import get_reference_directions
+            try:
+                n_partitions = max(1, int(self.n_vectors ** (1.0 / self.n_objectives)))
+                vectors = get_reference_directions(
+                    "das-dennis", self.n_objectives, n_partitions=n_partitions
+                )
+                # 如果数量不匹配，截断或补充
+                if len(vectors) > self.n_vectors:
+                    vectors = vectors[:self.n_vectors]
+                elif len(vectors) < self.n_vectors:
+                    extra = np.random.dirichlet(
+                        np.ones(self.n_objectives), self.n_vectors - len(vectors)
+                    )
+                    vectors = np.vstack([vectors, extra])
+            except Exception:
+                vectors = np.random.dirichlet(np.ones(self.n_objectives), self.n_vectors)
 
         return vectors
 
@@ -281,7 +298,7 @@ class KRVEAOptimizer:
 
             # 基于参考向量选择候选解
             selected_idx = self._select_by_reference_vectors(
-                predicted_objectives, self.config.batch_size if hasattr(self.config, 'batch_size') else 10
+                predicted_objectives, self.config.batch_size
             )
 
             X_selected = candidates[selected_idx]
@@ -335,16 +352,44 @@ class KRVEAOptimizer:
             size=(n_random, n_vars),
         )
 
-        # 扰动候选
+        # 扰动候选 - GP 引导的候选解生成
         if len(self.X_history) > 0:
             X_array = np.array(self.X_history)
-            # 选择较好的解进行扰动
-            y_array = np.array(self.y_history)
-            # 简化：随机选择历史解
-            indices = np.random.choice(len(X_array), n_perturbation, replace=True)
-            perturbation = np.random.normal(0, 0.1, (n_perturbation, n_vars))
             scale = np.array([b[1] - b[0] for b in bounds])
-            perturbed_candidates = X_array[indices] + perturbation * scale
+
+            # GP 引导的候选解生成
+            # 选择不确定性大的区域（探索）和预测值好的区域（开发）
+            y_array = np.array(self.y_history)
+
+            # 选择 Pareto 前沿解进行扰动（开发）
+            from ...utils import is_pareto_efficient
+            pareto_mask = is_pareto_efficient(y_array)
+            pareto_indices = np.where(pareto_mask)[0]
+
+            if len(pareto_indices) > 0:
+                n_exploit = n_perturbation // 2
+                n_explore = n_perturbation - n_exploit
+
+                # 开发：在 Pareto 解附近扰动
+                exploit_indices = np.random.choice(pareto_indices, n_exploit, replace=True)
+                exploit_perturbation = np.random.normal(0, 0.05, (n_exploit, n_vars))
+                exploit_candidates = X_array[exploit_indices] + exploit_perturbation * scale
+
+                # 探索：在不确定性大的区域采样
+                explore_candidates = np.random.uniform(
+                    [b[0] for b in bounds],
+                    [b[1] for b in bounds],
+                    size=(n_explore, n_vars),
+                )
+
+                perturbed_candidates = np.vstack([exploit_candidates, explore_candidates])
+            else:
+                # 没有 Pareto 解，全部随机
+                perturbed_candidates = np.random.uniform(
+                    [b[0] for b in bounds],
+                    [b[1] for b in bounds],
+                    size=(n_perturbation, n_vars),
+                )
 
             # 裁剪到边界
             for i, (lb, ub) in enumerate(bounds):

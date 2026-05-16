@@ -6,6 +6,7 @@ from typing import Optional
 
 import numpy as np
 from pymoo.core.problem import Problem
+from scipy.spatial import ConvexHull
 
 from ..models.station import StationDigitalTwin
 from ..simulation.em_simulator import EMSimulator
@@ -64,7 +65,7 @@ class ShortwaveStationProblem(Problem):
         )
 
         # 优化目标数量
-        n_obj = 3
+        n_obj = 4
 
         # 约束数量：所有天线对的隔离度约束
         n_constr = self.n_antennas * (self.n_antennas - 1) // 2
@@ -118,11 +119,13 @@ class ShortwaveStationProblem(Problem):
             f1_coverage = self._calculate_coverage()
             f2_interference = self._calculate_interference_risk()
             f3_cost = self._calculate_cost()
+            f4_spectrum = self._calculate_spectrum_efficiency()
 
             # 转为最小化问题
             F[idx, 0] = -f1_coverage      # 最大化覆盖 -> 最小化负覆盖
             F[idx, 1] = f2_interference    # 最小化干扰
             F[idx, 2] = f3_cost            # 最小化成本
+            F[idx, 3] = -f4_spectrum       # 最大化频谱效率
 
             # 计算约束
             G[idx] = self._calculate_constraints()
@@ -164,13 +167,19 @@ class ShortwaveStationProblem(Problem):
 
         coverage_map = np.zeros((len(test_azimuths), len(test_elevations)))
 
+        # 多频率评估覆盖
+        test_frequencies = [5.0, 10.0, 15.0, 20.0, 25.0]
+
         for ant in self.station.antennas:
             if ant.pattern is not None:
-                for ai, az in enumerate(test_azimuths):
-                    for ei, el in enumerate(test_elevations):
-                        # 使用 15 MHz 作为参考频率
-                        gain = ant.get_gain_at(15.0, az, el)
-                        coverage_map[ai, ei] += 10 ** (gain / 10)
+                for freq in test_frequencies:
+                    for ai, az in enumerate(test_azimuths):
+                        for ei, el in enumerate(test_elevations):
+                            gain = ant.get_gain_at(freq, az, el)
+                            coverage_map[ai, ei] += 10 ** (gain / 10)
+
+        # 归一化频率数量
+        coverage_map /= len(test_frequencies)
 
         # 归一化
         if coverage_map.max() > 0:
@@ -203,14 +212,19 @@ class ShortwaveStationProblem(Problem):
                 ant_i = self.station.antennas[i]
                 ant_j = self.station.antennas[j]
 
-                # 使用 15 MHz 作为参考频率
+                # 使用天线实际工作频率，无则用多频率平均
+                if ant_i.current_frequency and ant_j.current_frequency:
+                    freq = (ant_i.current_frequency + ant_j.current_frequency) / 2
+                else:
+                    freq = 15.0  # 默认
+
                 isolation = self.em_simulator.calculate_isolation(
-                    ant_i, ant_j, 15.0
+                    ant_i, ant_j, freq
                 )
 
-                # 计算潜在干扰功率
-                # 假设发射功率 30 dBm
-                interference = 30.0 - isolation
+                # 使用天线实际功率，无则用典型值
+                tx_power = ant_i.current_power if ant_i.is_transmitting else 30.0
+                interference = tx_power - isolation
 
                 # 超限部分作为风险
                 if interference > max_interference:
@@ -232,10 +246,16 @@ class ShortwaveStationProblem(Problem):
         """
         positions = np.array([ant.position for ant in self.station.antennas])
 
-        # 占地面积（使用凸包或边界框）
-        x_range = positions[:, 0].max() - positions[:, 0].min()
-        y_range = positions[:, 1].max() - positions[:, 1].min()
-        area = x_range * y_range
+        # 占地面积（使用凸包）
+        positions_2d = positions[:, :2]
+        try:
+            hull = ConvexHull(positions_2d)
+            area = hull.volume  # 2D 凸包的 volume 就是面积
+        except Exception:
+            # 退化情况用边界框
+            x_range = positions[:, 0].max() - positions[:, 0].min()
+            y_range = positions[:, 1].max() - positions[:, 1].min()
+            area = x_range * y_range
 
         # 归一化面积
         x_boundary = self.boundary[1] - self.boundary[0]
@@ -243,16 +263,42 @@ class ShortwaveStationProblem(Problem):
         max_area = x_boundary * y_boundary
         area_score = area / max_area
 
-        # 馈线长度估算（假设机房在中心）
+        # 馈线长度估算 - 基于最小生成树拓扑
+        # 机房位置（边界中心）
         center = np.array([
             (self.boundary[0] + self.boundary[1]) / 2,
             (self.boundary[2] + self.boundary[3]) / 2,
-            0,
         ])
-        total_cable = sum(
-            np.linalg.norm(ant.position[:2] - center[:2])
-            for ant in self.station.antennas
-        )
+
+        # Prim 最小生成树算法
+        n = len(positions)
+        visited = [False] * n
+        min_edge = np.full(n, np.inf)
+        min_edge[0] = 0
+        total_cable = 0.0
+
+        for _ in range(n):
+            # 找未访问节点中最小边
+            u = -1
+            for v in range(n):
+                if not visited[v] and (u == -1 or min_edge[v] < min_edge[u]):
+                    u = v
+
+            visited[u] = True
+            total_cable += min_edge[u]
+
+            # 更新邻接边（到机房的距离也作为一条边）
+            for v in range(n):
+                if not visited[v]:
+                    # 天线间距离
+                    dist = np.linalg.norm(positions[u, :2] - positions[v, :2])
+                    min_edge[v] = min(min_edge[v], dist)
+
+        # 加上每副天线到机房的馈线（树的根连接）
+        for i in range(n):
+            dist_to_center = np.linalg.norm(positions[i, :2] - center)
+            total_cable += dist_to_center * 0.1  # 10% 冗余连接
+
         max_cable = self.n_antennas * np.sqrt(max_area) / 2
         cable_score = total_cable / max(max_cable, 1)
 
@@ -277,13 +323,18 @@ class ShortwaveStationProblem(Problem):
                 ant_i = self.station.antennas[i]
                 ant_j = self.station.antennas[j]
 
-                # 计算隔离度
+                # 计算隔离度 - 使用实际频率
+                freq = 15.0
+                if ant_i.current_frequency:
+                    freq = ant_i.current_frequency
+
                 isolation = self.em_simulator.calculate_isolation(
-                    ant_i, ant_j, 15.0
+                    ant_i, ant_j, freq
                 )
 
-                # 计算干扰功率
-                interference = 30.0 - isolation
+                # 计算干扰功率 - 使用实际功率
+                tx_power = ant_i.current_power if ant_i.is_transmitting else 30.0
+                interference = tx_power - isolation
 
                 # 约束：干扰功率 <= 最大允许值
                 # g = interference - max_allowed <= 0
@@ -291,6 +342,30 @@ class ShortwaveStationProblem(Problem):
                 constraints.append(g)
 
         return np.array(constraints)
+
+    def _calculate_spectrum_efficiency(self) -> float:
+        """
+        计算频谱利用效率
+
+        基于天线覆盖的频率范围和方向多样性。
+        """
+        # 评估天线覆盖的频率范围利用率
+        covered_freqs = set()
+        for ant in self.station.antennas:
+            if ant.pattern is not None:
+                for freq in ant.pattern.frequencies:
+                    covered_freqs.add(round(freq, 0))
+
+        # 频率覆盖度
+        total_freq_bins = 29  # 2-30 MHz, 1 MHz 分辨率
+        freq_coverage = len(covered_freqs) / total_freq_bins
+
+        # 方向多样性 - 天线朝向的均匀性
+        azimuths = np.array([ant.azimuth for ant in self.station.antennas])
+        az_hist, _ = np.histogram(azimuths, bins=12, range=(0, 360))
+        az_uniformity = 1.0 - az_hist.std() / (az_hist.mean() + 1e-10)
+
+        return float(0.6 * freq_coverage + 0.4 * max(0, az_uniformity))
 
     def decode_solution(self, x: np.ndarray) -> StationDigitalTwin:
         """

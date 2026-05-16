@@ -150,6 +150,9 @@ class PrioritizedReplayBuffer:
         self.position = 0
         self.size = 0
 
+        self.beta = 0.4  # 初始 beta
+        self.beta_increment = 1e-6  # 每次采样递增
+
     def push(
         self,
         state: np.ndarray,
@@ -211,8 +214,9 @@ class PrioritizedReplayBuffer:
         # 采样
         indices = np.random.choice(self.size, batch_size, p=probs, replace=False)
 
-        # 重要性采样权重
-        weights = (self.size * probs[indices]) ** (-0.4)
+        # 重要性采样权重 (beta 退火到 1.0)
+        self.beta = min(1.0, self.beta + self.beta_increment)
+        weights = (self.size * probs[indices]) ** (-self.beta)
         weights = weights / weights.max()
 
         return (
@@ -326,9 +330,22 @@ class MODDQNAgent:
             state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
             q_values = self.q_network(state_tensor)
 
-            # 聚合多目标 Q 值（简单求和）
-            aggregated_q = q_values.sum(dim=1)  # (1, action_dim)
-            return aggregated_q.argmax(dim=1).item()
+            # 切比雪夫标量化聚合多目标 Q 值
+            # Q(s,a) = max_i{w_i * |Q_i(s,a) - z_i*|} 最小化
+            # 等价于: 对每个动作，计算各目标 Q 值的加权偏差，取最大值，再取最小的动作
+            n_obj = q_values.size(1)
+            action_dim = q_values.size(2)
+            # 权重向量（均匀分布）
+            weights = torch.ones(n_obj, device=self.device) / n_obj
+            # 参考点（理想点）- 使用当前批次的最大值
+            z_star = q_values.max(dim=2).values.max(dim=0).values  # (n_obj,)
+            # 加权偏差: |Q_i - z_star_i| * w_i
+            deviation = torch.abs(q_values - z_star.unsqueeze(0).unsqueeze(2))  # (1, n_obj, action_dim)
+            weighted_dev = weights.unsqueeze(0).unsqueeze(2) * deviation  # (1, n_obj, action_dim)
+            # 切比雪夫距离: 取各目标中最大偏差
+            tchebycheff = weighted_dev.max(dim=1).values  # (1, action_dim)
+            # 最小化切比雪夫距离 -> 取 argmin
+            return tchebycheff.argmin(dim=1).item()
 
     def update(self) -> Optional[float]:
         """
@@ -370,7 +387,13 @@ class MODDQNAgent:
                 2, next_actions.unsqueeze(1).unsqueeze(2).expand(-1, self.config.n_objectives, 1)
             ).squeeze(2)
 
-            target_q = rewards.unsqueeze(1) + self.config.gamma * next_q * (1 - dones.unsqueeze(1))
+            # 多目标回报分解
+            # r1: throughput (正奖励), r2: delay (负), r3: interference (负)
+            # 从标量回报分解：通过 reward_info 中的各分量
+            # 简化：将标量回报按目标权重分配到各目标头
+            w = torch.tensor([0.5, 0.3, 0.2], device=self.device)  # 与 env 的 reward_weights 一致
+            multi_rewards = rewards.unsqueeze(1) * w.unsqueeze(0)  # (batch, n_obj)
+            target_q = multi_rewards + self.config.gamma * next_q * (1 - dones.unsqueeze(1))
 
         # 计算损失
         td_errors = (current_q - target_q).abs()

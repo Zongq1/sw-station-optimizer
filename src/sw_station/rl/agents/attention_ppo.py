@@ -266,6 +266,7 @@ class RolloutBuffer:
         self.values = []
         self.log_probs = []
         self.dones = []
+        self.multi_rewards = []  # 多目标奖励
 
     def add(
         self,
@@ -275,6 +276,7 @@ class RolloutBuffer:
         value: float,
         log_prob: float,
         done: bool,
+        multi_reward: Optional[np.ndarray] = None,
     ):
         """添加经验"""
         self.states.append(state)
@@ -283,6 +285,8 @@ class RolloutBuffer:
         self.values.append(value)
         self.log_probs.append(log_prob)
         self.dones.append(done)
+        if multi_reward is not None:
+            self.multi_rewards.append(multi_reward)
 
     def clear(self):
         """清空缓冲区"""
@@ -292,6 +296,7 @@ class RolloutBuffer:
         self.values.clear()
         self.log_probs.clear()
         self.dones.clear()
+        self.multi_rewards.clear()
 
     def compute_returns(self, gamma: float, gae_lambda: float) -> tuple:
         """计算回报和优势"""
@@ -470,11 +475,12 @@ class AttentionMO_PPOAgent:
                 ) * advantages[batch_idx]
                 policy_loss = -torch.min(surr1, surr2).mean()
 
-                # 价值损失（多目标）
-                value_loss = F.mse_loss(
-                    values,
-                    returns[batch_idx].unsqueeze(1).expand_as(values),
-                )
+                # 价值损失（多目标）- 每个目标独立计算
+                # returns 是标量，分解为多目标回报
+                n_obj = values.size(1)
+                w = torch.tensor([0.5, 0.3, 0.2], device=values.device)
+                multi_returns = returns[batch_idx].unsqueeze(1) * w.unsqueeze(0)
+                value_loss = F.mse_loss(values, multi_returns)
 
                 # 总损失
                 loss = (

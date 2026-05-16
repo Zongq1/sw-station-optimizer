@@ -90,9 +90,12 @@ class SkyWavePropagation:
         distance_factor = 1.0 + 0.1 * np.log10(hop_distance / 3000.0)
         distance_factor = np.clip(distance_factor, 0.8, 1.2)
 
-        # 时段修正
-        # 白天 MUF 较高，夜间较低
-        time_factor = 1.0  # 简化处理
+        # 时段修正 - 基于电离层 foF2 的昼夜变化
+        # 白天 foF2 高 -> MUF 高，夜间 foF2 低 -> MUF 低
+        # 利用 ionosphere 已有的 foF2 和 muf_3000 关系
+        # time_factor 基于 foF2 相对于典型值的比例
+        typical_fof2 = 8.0  # 典型 foF2 (MHz)
+        time_factor = np.clip(ionosphere.fof2 / typical_fof2, 0.6, 1.4)
 
         muf = base_muf * distance_factor * time_factor
 
@@ -104,11 +107,13 @@ class SkyWavePropagation:
         ionosphere: IonosphericState,
         tx_power_dbm: float = 30.0,
         required_snr_db: float = 10.0,
+        rx_sensitivity_dbm: float = -120.0,
     ) -> float:
         """
         计算最低可用频率 (LUF)
 
-        LUF 受电离层吸收限制
+        LUF 由电离层吸收和接收机灵敏度共同决定。
+        频率越低，电离层吸收越大，当接收功率低于灵敏度时即为 LUF。
 
         Parameters
         ----------
@@ -120,31 +125,35 @@ class SkyWavePropagation:
             发射功率 (dBm)
         required_snr_db : float
             所需信噪比 (dB)
+        rx_sensitivity_dbm : float
+            接收机灵敏度 (dBm)
 
         Returns
         -------
         float
             LUF (MHz)
         """
-        # 简化模型：LUF 与电离层吸收相关
-        # 频率越低，吸收越大
-        # 典型 LUF 范围 2-8 MHz
+        # 二分法搜索 LUF：找到使接收功率 = 灵敏度的频率
+        f_low, f_high = 2.0, 15.0
 
-        # 基于距离的 LUF 估算
-        base_luf = 3.0  # MHz
+        for _ in range(30):
+            f_mid = (f_low + f_high) / 2
 
-        # 距离修正（距离越远，需要更高频率以减少吸收）
-        distance_factor = 1.0 + 0.2 * np.log10(distance_km / 1000.0)
+            # 计算该频率的路径损耗
+            path_loss = self.calculate_path_loss(f_mid, distance_km, ionosphere)
 
-        # 功率修正（功率越大，LUF 越低）
-        power_factor = 1.0 - 0.1 * (tx_power_dbm - 30.0) / 10.0
+            # 接收功率
+            rx_power = tx_power_dbm - path_loss
 
-        # 电离层状态修正（高吸收时 LUF 升高）
-        absorption_factor = 1.0 + 0.1 * (ionosphere.solar_sunspot_number / 100.0)
+            # 所需最小接收功率 = 灵敏度 + 所需SNR + 噪声余量
+            min_rx_power = rx_sensitivity_dbm + required_snr_db
 
-        luf = base_luf * distance_factor * power_factor * absorption_factor
+            if rx_power > min_rx_power:
+                f_high = f_mid  # 频率可以更低
+            else:
+                f_low = f_mid   # 需要更高频率
 
-        return max(luf, 2.0)  # 最低 2 MHz
+        return max((f_low + f_high) / 2, 2.0)
 
     def calculate_path_loss(
         self,
@@ -184,8 +193,12 @@ class SkyWavePropagation:
         n_hops = PropagationPath.estimate_hops(distance_km, elevation_angle)
         ground_loss = self._ground_reflection_loss(n_hops)
 
-        # 极化耦合损耗
-        polarization_loss = 3.0  # 典型值
+        # 极化耦合损耗 - 基于法拉第旋转效应
+        # 低频时法拉第旋转大，极化损耗可达 10-20 dB
+        # 高频时旋转小，损耗接近 0
+        freq_factor = max(0.1, 1.0 - frequency / 30.0)
+        solar_factor = 1.0 + 0.5 * (ionosphere.solar_sunspot_number / 200.0)
+        polarization_loss = 6.0 * freq_factor * solar_factor
 
         # 多径衰落余量
         multipath_margin = self._multipath_fading_margin(distance_km)
@@ -213,24 +226,29 @@ class SkyWavePropagation:
         """
         计算电离层吸收损耗
 
-        基于简化模型：吸收与频率平方成反比，与太阳活动正相关
+        基于 ITU-R P.533 非偏离吸收模型：
+        L_a = (sec(phi_i) / (f + f_L)^n) * A
+
+        其中 phi_i 是电离层入射角，f_L 是地磁旋频率，n≈1.5-2
         """
-        # 基础吸收系数
-        base_absorption = 5.0  # dB
-
-        # 频率因子（频率越高，吸收越小）
-        freq_factor = (10.0 / frequency) ** 1.5
-
-        # 太阳活动因子
-        solar_factor = 1.0 + 0.5 * (ionosphere.solar_sunspot_number / 100.0)
-
-        # 距离因子（多次穿越电离层）
         n_hops = PropagationPath.estimate_hops(distance)
-        hop_factor = n_hops
 
-        absorption = base_absorption * freq_factor * solar_factor * hop_factor
+        # 吸收系数与 foF2 正相关（电子密度越高吸收越大）
+        # 与频率负相关（近似 f^(-1.5) 到 f^(-2)）
+        # 使用 (foF2/f)^2 作为归一化吸收因子
+        freq_ratio = ionosphere.fof2 / max(frequency, 1.0)
+        absorption_per_hop = 15.0 * freq_ratio ** 1.5  # dB/hop
 
-        return max(absorption, 0.0)
+        # 太阳活动修正
+        solar_factor = 1.0 + 0.3 * (ionosphere.solar_sunspot_number / 100.0)
+
+        # E 层吸收（低频时更显著）
+        e_layer_factor = ionosphere.foe / max(frequency, 1.0)
+        e_absorption = 5.0 * e_layer_factor * solar_factor
+
+        total_absorption = (absorption_per_hop * solar_factor + e_absorption) * n_hops
+
+        return max(total_absorption, 0.0)
 
     def _ground_reflection_loss(self, n_hops: int) -> float:
         """计算地面反射损耗"""
@@ -355,10 +373,12 @@ class SkyWavePropagation:
         # 传播模式判断
         if distance_km < 100:
             prop_mode = PropagationMode.GROUND_WAVE
+        elif distance_km < 300 and frequency < luf * 1.2:
+            prop_mode = PropagationMode.MIXED  # 地波和天波共存
         elif frequency > muf * 0.85:
-            prop_mode = PropagationMode.SKY_WAVE
+            prop_mode = PropagationMode.SKY_WAVE  # 接近 MUF，天波传播
         else:
-            prop_mode = PropagationMode.SKY_WAVE
+            prop_mode = PropagationMode.SKY_WAVE  # 正常天波传播
 
         # 跳数
         n_hops = PropagationPath.estimate_hops(distance_km)
@@ -390,12 +410,23 @@ class SkyWavePropagation:
         return 1.0 / (1.0 + np.exp(-0.3 * link_margin))
 
     def _estimate_multipath_delay(self, distance: float, n_hops: int) -> float:
-        """估算多径时延扩展 (ms)"""
-        # 简化模型：基于距离和跳数
-        base_delay = 0.5  # ms
-        distance_factor = distance / 3000.0
-        hop_factor = n_hops / 3.0
-        return base_delay * (1 + distance_factor + hop_factor)
+        """
+        估算多径时延扩展 (ms)
+
+        基于各跳几何路径差异：
+        - 单跳模式下多径主要来自高角/低角射线
+        - 多跳模式下各跳路径长度差异累积
+        """
+        if n_hops <= 1:
+            # 单跳：高角和低角射线的路径差
+            # 典型 0.5-2 ms
+            return 0.5 + 1.5 * distance / 3000.0
+
+        # 多跳：每跳的路径差累积
+        hop_distance = distance / n_hops
+        # 每跳多径时延 ~ hop_distance / (c * sin(el)) 差异
+        base_per_hop = 0.3  # ms/hop
+        return base_per_hop * n_hops * (1 + hop_distance / 2000.0)
 
     def find_optimal_frequency(
         self,
