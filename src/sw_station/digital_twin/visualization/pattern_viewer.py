@@ -13,7 +13,8 @@ try:
 except ImportError:
     HAS_MATPLOTLIB = False
 
-from ...models.antenna import AntennaPatternCube, AntennaDevice
+from ...models.antenna import AntennaPatternCube
+from ...models.station import AntennaDevice
 
 
 class AntennaPatternViewer:

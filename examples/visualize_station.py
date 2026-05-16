@@ -11,6 +11,10 @@ import os
 # 添加项目路径
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
+# 输出目录
+OUTPUT_DIR = os.path.join(os.path.dirname(__file__), '..', 'output', 'visualizations')
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
 from sw_station.models.station import StationDigitalTwin
 from sw_station.models.antenna import create_default_antenna_library
 from sw_station.simulation.em_simulator import EMSimulator
@@ -160,6 +164,7 @@ def demo_propagation():
 
 if __name__ == "__main__":
     print("短波台站多目标优化系统 - 可视化演示")
+    print(f"输出目录: {OUTPUT_DIR}")
     print()
 
     # 台站创建演示
@@ -173,6 +178,88 @@ if __name__ == "__main__":
 
     # 传播预测演示
     demo_propagation()
+
+    # 生成可视化图表
+    print("\n" + "=" * 60)
+    print("生成可视化图表...")
+    print("=" * 60)
+
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+
+        # 创建台站
+        station = StationDigitalTwin.create_default_station(n_antennas=10)
+
+        # 1. 台站布局图
+        fig, ax = plt.subplots(figsize=(10, 10))
+        for ant in station.antennas:
+            color = 'red' if ant.is_transmitting else 'blue'
+            marker = '^' if ant.is_transmitting else 'o'
+            ax.scatter(ant.position[0], ant.position[1], c=color, marker=marker, s=100)
+            ax.annotate(ant.id, (ant.position[0], ant.position[1]), fontsize=8, ha='center', va='bottom')
+        ax.set_xlabel('X (m)')
+        ax.set_ylabel('Y (m)')
+        ax.set_title('Station Antenna Layout')
+        ax.grid(True, alpha=0.3)
+        ax.set_aspect('equal')
+        path = os.path.join(OUTPUT_DIR, 'station_layout.png')
+        plt.savefig(path, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"  已保存: {path}")
+
+        # 2. 隔离度矩阵热力图
+        from sw_station.simulation.em_simulator import EMSimulator
+        simulator = EMSimulator()
+        n = station.n_antennas
+        iso_matrix = np.zeros((n, n))
+        for i in range(n):
+            for j in range(n):
+                if i != j:
+                    iso_matrix[i, j] = simulator.calculate_isolation(
+                        station.antennas[i], station.antennas[j], 15.0
+                    )
+                else:
+                    iso_matrix[i, j] = 0
+
+        fig, ax = plt.subplots(figsize=(10, 8))
+        im = ax.imshow(iso_matrix, cmap='RdYlGn', aspect='auto')
+        ax.set_xticks(range(n))
+        ax.set_yticks(range(n))
+        ax.set_xticklabels([a.id for a in station.antennas], rotation=45, fontsize=8)
+        ax.set_yticklabels([a.id for a in station.antennas], fontsize=8)
+        ax.set_title('Isolation Matrix (dB)')
+        plt.colorbar(im, ax=ax)
+        path = os.path.join(OUTPUT_DIR, 'isolation_matrix.png')
+        plt.savefig(path, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"  已保存: {path}")
+
+        # 3. 天线极坐标方向图
+        from sw_station.models.antenna import AntennaType, AntennaPatternCube
+        pattern = AntennaPatternCube.create_synthetic("DEMO", AntennaType.YAGI, peak_gain=10.0)
+
+        azimuths = np.linspace(0, 360, 361)
+        gains = [pattern.get_gain(15.0, az, 15.0) for az in azimuths]
+        gains = np.array(gains)
+        gains_norm = gains - gains.max()
+
+        fig, ax = plt.subplots(figsize=(8, 8), subplot_kw={'projection': 'polar'})
+        theta = np.radians(azimuths)
+        ax.plot(theta, gains_norm, linewidth=2)
+        ax.fill(theta, gains_norm, alpha=0.3)
+        ax.set_ylim(-30, 0)
+        ax.set_title('Yagi Antenna Polar Pattern (15MHz, el=15°)')
+        path = os.path.join(OUTPUT_DIR, 'antenna_pattern_polar.png')
+        plt.savefig(path, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"  已保存: {path}")
+
+        print("\n可视化完成！")
+
+    except Exception as e:
+        print(f"可视化生成失败: {e}")
 
     print("\n" + "=" * 60)
     print("演示完成！")

@@ -139,13 +139,18 @@ class NSGARunner:
         algorithm = self.create_algorithm(problem)
 
         # 运行优化
+        minimize_kwargs = {
+            "seed": self.config.seed,
+            "verbose": self.config.verbose,
+        }
+        if callback is not None:
+            minimize_kwargs["callback"] = callback
+
         res = minimize(
             problem,
             algorithm,
             ("n_gen", self.config.max_generations),
-            seed=self.config.seed,
-            verbose=self.config.verbose,
-            callback=callback,
+            **minimize_kwargs,
         )
 
         # 提取结果

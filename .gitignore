@@ -48,6 +48,9 @@ htmlcov/
 data/antenna_patterns/*.npy
 data/antenna_patterns/*.npz
 
+# Output
+output/
+
 # OS
 .DS_Store
 Thumbs.db

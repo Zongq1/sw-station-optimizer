@@ -48,7 +48,17 @@ class TestIsolationMatrix:
         matrix = IsolationMatrix(5)
         matrix.set_isolation(0, 1, 100.0)
 
-        # 高隔离度，应满足约束
+        # 发射功率 30 dBm，隔离度 100 dB → 干扰功率 = -70 dBm
+        # -70 > -130，不满足约束
+        result = matrix.check_interference_constraint(
+            tx_idx=0, rx_idx=1,
+            tx_power_dbm=30.0,
+            max_allowed_interference_dbm=-130.0,
+        )
+        assert result is False
+
+        # 高隔离度场景：隔离度 200 dB → 干扰功率 = 30 - 200 = -170 dBm
+        matrix.set_isolation(0, 1, 200.0)
         result = matrix.check_interference_constraint(
             tx_idx=0, rx_idx=1,
             tx_power_dbm=30.0,
@@ -66,8 +76,8 @@ class TestIsolationMatrix:
         matrix.set_isolation(1, 2, 70.0)
 
         active_links = [
-            {"tx_idx": 0, "tx_power": 30.0, "frequency": 15.0},
-            {"tx_idx": 1, "tx_power": 30.0, "frequency": 15.5},
+            {"tx_idx": 0, "rx_idx": 1, "tx_power": 30.0, "frequency": 15.0},
+            {"tx_idx": 1, "rx_idx": 2, "tx_power": 30.0, "frequency": 15.5},
         ]
 
         penalty, events = matrix.evaluate_station_interference(

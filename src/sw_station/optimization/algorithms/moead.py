@@ -12,6 +12,7 @@ from pymoo.core.problem import Problem
 from pymoo.optimize import minimize
 from pymoo.operators.crossover.sbx import SBX
 from pymoo.operators.mutation.pm import PM
+from pymoo.operators.sampling.rnd import FloatRandomSampling
 from pymoo.util.ref_dirs import get_reference_directions
 
 from ..utils import OptimizationResult, extract_pareto_front, calculate_hypervolume
@@ -94,7 +95,7 @@ class MOEADRunner:
             ref_dirs=ref_dirs,
             n_neighbors=self.config.neighborhood_size,
             prob_neighbor_mating=self.config.neighborhood_selection_prob,
-            sampling=None,  # 使用默认采样
+            sampling=FloatRandomSampling(),
             crossover=crossover,
             mutation=mutation,
         )
